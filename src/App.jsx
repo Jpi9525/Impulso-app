@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Check, Inbox as InboxIcon, Calendar as CalendarIcon, Users, Settings as SettingsIcon,
   Mic, Plus, Trash2, Clock, Tag, ChevronLeft, ChevronRight, ChevronRight as Arrow, X, Star,
+  ChevronDown, ChevronUp,
   Crown, Bell, Home, Search, Edit2, ListChecks, Sparkles, Send, RefreshCw, Link2, LogOut,
   Shield, CheckCircle2, Circle, CalendarPlus, Repeat, UserCheck, LayoutGrid, ClipboardList, Mail
 } from "lucide-react";
@@ -704,7 +705,8 @@ function MainApp({ session }) {
     hoy: <Hoy state={state} patch={patch} t={t} go={setTab}
       assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
     inbox: <InboxScreen state={state} patch={patch} t={t} />,
-    cal: <CalendarScreen state={state} patch={patch} t={t} />,
+    cal: <CalendarScreen state={state} patch={patch} t={t}
+      assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
     mentores: <MentoresScreen state={state} t={t} user={user} myName={myName}
       mentorships={mentorships} sharedTasks={sharedTasks} refresh={refreshMentor} />,
     ajustes: <Ajustes state={state} patch={patch} t={t} reset={() => supabase.auth.signOut()} />,
@@ -749,6 +751,10 @@ function Header({ title, t, subtitle, right }) {
 function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
   const [editor, setEditor] = useState(null);
   const [mode, setMode] = useState("hoy");
+  const [openGroups, setOpenGroups] = useState({});
+  const [dateFilter, setDateFilter] = useState("todas");
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
   const [voiceMsg, setVoiceMsg] = useState("");
   const voice = useVoice();
   const today = todayISO();
@@ -796,8 +802,24 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
     );
   };
 
+  const startOfWeek = (() => {
+    const d = new Date(today + "T00:00:00");
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d.toISOString().slice(0, 10);
+  })();
+  const endOfWeek = addDays(startOfWeek, 6);
+  const dateMatches = (ds) => {
+    if (!ds) return dateFilter === "todas";
+    if (dateFilter === "todas") return true;
+    if (dateFilter === "dia") return ds === today;
+    if (dateFilter === "semana") return ds >= startOfWeek && ds <= endOfWeek;
+    if (dateFilter === "mes") return ds.slice(0, 7) === today.slice(0, 7);
+    if (dateFilter === "anio") return ds.slice(0, 4) === today.slice(0, 4);
+    if (dateFilter === "rango") return (!rangeFrom || ds >= rangeFrom) && (!rangeTo || ds <= rangeTo);
+    return true;
+  };
   const groups = state.classifications.map((c) => ({
-    c, items: state.tasks.filter((x) => x.classificationId === c.id),
+    c, items: state.tasks.filter((x) => x.classificationId === c.id && dateMatches(x.date)),
   })).filter((g) => g.items.length);
 
   return (
@@ -910,20 +932,50 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
           ))}
         </>)}
         {mode === "grupo" && (<>
-          {groups.length === 0 && <Empty t={t} text="Aún no hay tareas." />}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {[["dia", "Día"], ["semana", "Semana"], ["mes", "Mes"], ["anio", "Año"],
+              ["rango", "Rango"], ["todas", "Todas"]].map(([k, l]) => (
+              <button key={k} onClick={() => setDateFilter(k)} style={chip(t, dateFilter === k)}>{l}</button>
+            ))}
+          </div>
+          {dateFilter === "rango" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <label style={{ flex: 1 }}>
+                <span style={{ fontSize: 11, color: t.faint }}>Desde</span>
+                <input type="date" style={inputStyle(t)} value={rangeFrom}
+                  onChange={(e) => setRangeFrom(e.target.value)} />
+              </label>
+              <label style={{ flex: 1 }}>
+                <span style={{ fontSize: 11, color: t.faint }}>Hasta</span>
+                <input type="date" style={inputStyle(t)} value={rangeTo}
+                  onChange={(e) => setRangeTo(e.target.value)} />
+              </label>
+            </div>
+          )}
+          {groups.length === 0 && <Empty t={t} text="No hay tareas en ese periodo." />}
           {groups.map(({ c, items }) => {
             const cDone = items.filter((x) => isDoneOn(x, x.date || today)).length;
+            const open = !!openGroups[c.id];
             return (
-              <div key={c.id} style={{ marginBottom: 16 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 7 }}>
+              <div key={c.id} style={{ marginBottom: 9 }}>
+                <button onClick={() => setOpenGroups((g) => ({ ...g, [c.id]: !g[c.id] }))}
+                  style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", cursor: "pointer",
+                    background: t.surface, border: "none", borderRadius: 12, padding: "12px 14px",
+                    boxShadow: t.shadow, borderLeft: `4px solid ${c.color}` }}>
                   <span style={{ width: 12, height: 12, borderRadius: 3, background: c.color, transform: "rotate(45deg)" }} />
-                  <h3 style={{ fontFamily: "var(--display)", fontSize: 15, margin: 0, color: t.text }}>{c.name}</h3>
+                  <h3 style={{ fontFamily: "var(--display)", fontSize: 15, margin: 0, color: t.text,
+                    flex: 1, textAlign: "left" }}>{c.name}</h3>
                   <span style={{ fontSize: 11, color: t.faint }}>{cDone}/{items.length}</span>
-                </div>
-                {items.map((task) => (
-                  <TaskRow key={task.id} task={task} cls={c} t={t} day={task.date || today} state={state}
-                    onToggle={() => toggleDone(task, task.date || today)} onOpen={() => setEditor(task)} />
-                ))}
+                  {open ? <ChevronUp size={18} color={t.faint} /> : <ChevronDown size={18} color={t.faint} />}
+                </button>
+                {open && (
+                  <div style={{ marginTop: 8 }}>
+                    {items.map((task) => (
+                      <TaskRow key={task.id} task={task} cls={c} t={t} day={task.date || today} state={state}
+                        onToggle={() => toggleDone(task, task.date || today)} onOpen={() => setEditor(task)} />
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1303,7 +1355,7 @@ function ScheduleModal({ item, t, onClose, onApply }) {
 }
 
 /* ============================== CALENDARIO =============================== */
-function CalendarScreen({ state, patch, t }) {
+function CalendarScreen({ state, patch, t, assignedToMe = [], onToggleShared }) {
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [selected, setSelected] = useState(todayISO());
   const [reschedule, setReschedule] = useState(null);
@@ -1319,6 +1371,7 @@ function CalendarScreen({ state, patch, t }) {
     cells.push(`${cursor.y}-${String(cursor.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
 
   const dayTasks = state.tasks.filter((x) => occursOn(x, selected));
+  const dayMentor = assignedToMe.filter((x) => x.date === selected);
   const move = (n) => setCursor((c) => {
     let m = c.m + n, y = c.y;
     if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
@@ -1353,6 +1406,7 @@ function CalendarScreen({ state, patch, t }) {
           {cells.map((iso, i) => {
             if (!iso) return <div key={i} />;
             const dts = state.tasks.filter((x) => occursOn(x, iso));
+            const mts = assignedToMe.filter((x) => x.date === iso);
             const isSel = iso === selected, isToday = iso === todayISO();
             return (
               <button key={i} onClick={() => setSelected(iso)} style={{ aspectRatio: "1", borderRadius: 10,
@@ -1366,6 +1420,8 @@ function CalendarScreen({ state, patch, t }) {
                       background: isSel ? t.primaryFg
                         : (taskMentor(x, state) ? MENTOR_COLOR : cls(x.classificationId).color) }} />
                   ))}
+                  {mts.length > 0 && <span style={{ width: 5, height: 5, borderRadius: "50%",
+                    background: isSel ? t.primaryFg : MENTOR_COLOR }} />}
                 </span>
               </button>
             );
@@ -1375,7 +1431,8 @@ function CalendarScreen({ state, patch, t }) {
       <div style={{ padding: "16px 20px 30px" }}>
         <h3 style={{ fontFamily: "var(--display)", fontSize: 16, margin: "0 0 4px", color: t.text }}>{fmtDate(selected)}</h3>
         <p style={{ fontSize: 12, color: t.faint, margin: "0 0 12px" }}>Cambia el estatus con los botones; toca el ícono ↻ para reprogramar.</p>
-        {dayTasks.length === 0 && <Empty t={t} text="Sin tareas este día." />}
+        {dayTasks.length === 0 && dayMentor.length === 0 &&
+          <Empty t={t} text="Sin tareas este día." />}
         {dayTasks.map((task) => {
           const st = dayStatus(task, selected);
           const mentor = taskMentor(task, state);
@@ -1404,6 +1461,27 @@ function CalendarScreen({ state, patch, t }) {
             </div>
           );
         })}
+        {dayMentor.map((tk) => (
+          <div key={tk.id} style={{ background: t.surface, borderRadius: 12, padding: 11, marginBottom: 8,
+            boxShadow: t.shadow, borderLeft: `4px solid ${MENTOR_COLOR}` }}>
+            <div style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+              <button onClick={() => onToggleShared && onToggleShared(tk.id, !tk.done)}
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 0, marginTop: 1 }}>
+                {tk.done ? <CheckCircle2 size={22} color={t.success} /> : <Circle size={22} color={t.faint} />}
+              </button>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: t.text,
+                  textDecoration: tk.done ? "line-through" : "none" }}>{tk.title}</div>
+                <div style={{ fontSize: 11, color: t.faint, display: "flex", gap: 6,
+                  alignItems: "center", flexWrap: "wrap", marginTop: 3 }}>
+                  {tk.classification && <span>{tk.classification}{tk.time ? ` · ${tk.time}` : ""}</span>}
+                  <MentorBadge name={tk.creator_name || "Mentor"} kind="assigned" t={t} />
+                  {tk.grade && <Pill t={t} text={`★ ${tk.grade}/5`} color="#C8860A" />}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
       {reschedule && (
         <ScheduleModal item={{ ...reschedule, mode: "postpone" }} t={t} onClose={() => setReschedule(null)}
