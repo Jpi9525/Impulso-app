@@ -371,7 +371,7 @@ function Diamond({ size = 64, t }) {
 
 /* ============================== ONBOARDING =============================== */
 function Onboarding({ onDone }) {
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(1);
   const [theme, setTheme] = useState("profesional");
   const [authMethod, setAuthMethod] = useState(null);
   const [name, setName] = useState("");
@@ -407,24 +407,9 @@ function Onboarding({ onDone }) {
   const Sub = ({ children }) => <p style={{ color: t.textMuted, margin: "0 0 20px", fontSize: 14 }}>{children}</p>;
   const Dots = () => (
     <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-      {[0, 1, 2, 3, 4, 5].map((i) => (
+      {[1, 2, 3, 4, 5].map((i) => (
         <span key={i} style={{ height: 4, flex: 1, borderRadius: 4, background: i <= step ? t.primary : t.border }} />
       ))}
-    </div>
-  );
-
-  if (step === 0) return (
-    <div style={wrap}><Dots />
-      <div style={{ textAlign: "center", marginTop: 32 }}>
-        <Diamond size={86} t={t} />
-        <h1 style={{ fontFamily: "var(--display)", fontSize: 40, margin: "20px 0 4px", letterSpacing: -1 }}>Impulso</h1>
-        <p style={{ color: t.textMuted, fontSize: 15 }}>Pequeños pasos, gran impulso.</p>
-        <p style={{ color: t.text, fontSize: 14, marginTop: 24, lineHeight: 1.6 }}>
-          Organiza hábitos y tareas, captura pendientes por voz y avanza con el apoyo de un mentor.
-          Lo dejamos listo en menos de 60 segundos.
-        </p>
-      </div>
-      <Btn t={t} full onClick={() => setStep(1)} style={{ marginTop: 30 }}>Empezar <Arrow size={18} /></Btn>
     </div>
   );
 
@@ -551,18 +536,33 @@ function AuthScreen() {
   const [mode, setMode] = useState("login");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
 
   const submit = async () => {
+    setErr(""); setInfo("");
     if (!email.trim() || pass.length < 6) {
       setErr("Escribe un correo y una contraseña de al menos 6 caracteres.");
       return;
     }
-    setBusy(true); setErr("");
-    const fn = mode === "login"
-      ? supabase.auth.signInWithPassword({ email: email.trim(), password: pass })
-      : supabase.auth.signUp({ email: email.trim(), password: pass });
-    const { error } = await fn;
+    setBusy(true);
+    if (mode === "login") {
+      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass });
+      if (error) setErr(error.message);
+    } else {
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(), password: pass,
+        options: { emailRedirectTo: window.location.origin },
+      });
+      if (error) setErr(error.message);
+      else if (!data.session) setInfo("Cuenta creada. Revisa tu correo para confirmarla y luego inicia sesión.");
+    }
     setBusy(false);
+  };
+  const oauth = async (provider) => {
+    setErr("");
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider, options: { redirectTo: window.location.origin },
+    });
     if (error) setErr(error.message);
   };
 
@@ -581,7 +581,21 @@ function AuthScreen() {
         <p style={{ color: t.textMuted, fontSize: 14, marginTop: 0 }}>
           {mode === "login" ? "Entra a tu cuenta." : "Crea tu cuenta."}
         </p>
-        <div style={{ marginTop: 16, textAlign: "left" }}>
+
+        <button onClick={() => oauth("google")} style={{ width: "100%", padding: 13, borderRadius: 12,
+          marginTop: 16, cursor: "pointer", background: "#fff", color: "#222",
+          border: `1.5px solid ${t.border}`, fontWeight: 700, fontSize: 14 }}>
+          Continuar con Google
+        </button>
+        <button onClick={() => oauth("facebook")} style={{ width: "100%", padding: 13, borderRadius: 12,
+          marginTop: 10, cursor: "pointer", background: "#1877F2", color: "#fff",
+          border: "none", fontWeight: 700, fontSize: 14 }}>
+          Continuar con Facebook
+        </button>
+
+        <div style={{ color: t.faint, fontSize: 12, margin: "14px 0 10px" }}>— o con tu correo —</div>
+
+        <div style={{ textAlign: "left" }}>
           <input style={inputStyle(t)} value={email} type="email"
             onChange={(e) => setEmail(e.target.value)} placeholder="tu@correo.com" />
           <div style={{ height: 10 }} />
@@ -591,12 +605,13 @@ function AuthScreen() {
           <Btn t={t} full disabled={busy} onClick={submit} style={{ marginTop: 12 }}>
             {busy ? "Procesando…" : mode === "login" ? "Entrar" : "Crear cuenta"}
           </Btn>
-          <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setErr(""); }}
+          <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setErr(""); setInfo(""); }}
             style={{ background: "none", border: "none", cursor: "pointer", color: t.primary,
               fontWeight: 700, fontSize: 13, marginTop: 12, width: "100%" }}>
             {mode === "login" ? "¿No tienes cuenta? Crear una" : "Ya tengo cuenta, entrar"}
           </button>
         </div>
+        {info && <p style={{ color: t.success, fontSize: 12, marginTop: 10 }}>{info}</p>}
         {err && <p style={{ color: t.danger, fontSize: 12, marginTop: 10 }}>{err}</p>}
       </div>
     </div></>
@@ -740,8 +755,11 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
   const cls = (id) => state.classifications.find((c) => c.id === id) || GOOGLE_CLASS;
 
   const todays = state.tasks.filter((x) => occursOn(x, today));
-  const done = todays.filter((x) => isDoneOn(x, today)).length;
-  const pct = todays.length ? Math.round((done / todays.length) * 100) : 0;
+  const mentorToday = assignedToMe.filter((x) => x.date === today);
+  const done = todays.filter((x) => isDoneOn(x, today)).length
+    + mentorToday.filter((x) => x.done).length;
+  const totalToday = todays.length + mentorToday.length;
+  const pct = totalToday ? Math.round((done / totalToday) * 100) : 0;
   const inboxCount = state.tasks.filter((x) => !x.date).length;
   const ownTasks = todays;
 
@@ -790,21 +808,17 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
       {/* CAPTURA POR VOZ EN EL MAIN */}
       <div style={{ margin: "0 20px 14px", background: t.surface, borderRadius: t.radius, padding: 14,
         boxShadow: t.shadow }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button onClick={voice.listening ? voice.stop : captureVoice} style={{ width: 52, height: 52,
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <button onClick={voice.listening ? voice.stop : captureVoice} style={{ width: 96, height: 96,
             borderRadius: "50%", border: "none", cursor: "pointer", flexShrink: 0,
             background: voice.listening ? t.danger : t.primary, color: "#fff",
-            display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Mic size={24} />
+            display: "flex", alignItems: "center", justifyContent: "center", boxShadow: t.shadow }}>
+            <Mic size={46} />
           </button>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 800, color: t.text, fontSize: 14 }}>
-              {voice.listening ? "🎙️ Escuchando…" : "Captura por voz"}
-            </div>
-            <div style={{ fontSize: 12, color: t.textMuted }}>
-              {voiceMsg || 'Di: “Agrega limpiar la casa a pendientes”'}
-            </div>
+          <div style={{ fontWeight: 800, color: t.text, fontSize: 15 }}>
+            {voice.listening ? "🎙️ Escuchando…" : "Captura por voz"}
           </div>
+          {voiceMsg && <div style={{ fontSize: 12, color: t.textMuted, textAlign: "center" }}>{voiceMsg}</div>}
         </div>
         {state.notifications.voiceAssistant && (
           <div style={{ marginTop: 10, fontSize: 11, color: t.faint, background: t.surfaceAlt,
@@ -822,7 +836,7 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
         <div style={{ height: 7, background: "rgba(255,255,255,.25)", borderRadius: 6, marginTop: 6 }}>
           <div style={{ width: pct + "%", height: "100%", background: t.primaryFg, borderRadius: 6, transition: "width .3s" }} />
         </div>
-        <div style={{ fontSize: 12, opacity: .85, marginTop: 6 }}>{done} de {todays.length} completadas</div>
+        <div style={{ fontSize: 12, opacity: .85, marginTop: 6 }}>{done} de {totalToday} completadas</div>
       </div>
 
       {inboxCount > 0 && (
@@ -836,7 +850,7 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
       )}
 
       {/* SECCIÓN: TAREAS ENCARGADAS POR TUS MENTORES (datos reales de Supabase) */}
-      {assignedToMe.length > 0 && (
+      {mentorToday.length > 0 && (
         <div style={{ margin: "0 20px 14px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
             <UserCheck size={16} color={MENTOR_COLOR} />
@@ -844,7 +858,7 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
               Encargadas por tus mentores
             </h3>
           </div>
-          {assignedToMe.map((tk) => (
+          {mentorToday.map((tk) => (
             <div key={tk.id} style={{ display: "flex", gap: 11, alignItems: "flex-start",
               background: t.surface, borderRadius: 14, padding: 12, marginBottom: 9,
               boxShadow: t.shadow, borderLeft: `4px solid ${MENTOR_COLOR}` }}>
@@ -888,7 +902,7 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
 
       <div style={{ padding: "0 20px 30px" }}>
         {mode === "hoy" && (<>
-          {ownTasks.length === 0 && assignedToMe.length === 0 &&
+          {ownTasks.length === 0 && mentorToday.length === 0 &&
             <Empty t={t} text="Nada para hoy. Toca + o usa la voz para crear algo." />}
           {ownTasks.map((task) => (
             <TaskRow key={task.id} task={task} cls={cls(task.classificationId)} t={t} day={today} state={state}
@@ -1111,6 +1125,7 @@ function TaskEditor({ task, state, patch, t, onClose }) {
         </div>
       </Field>
       <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+        <Btn t={t} variant="soft" onClick={onClose}>Cancelar</Btn>
         {!isNew && <Btn t={t} variant="danger" onClick={del}><Trash2 size={16} /></Btn>}
         <Btn t={t} full disabled={!title.trim()} onClick={save}>Guardar</Btn>
       </div>
@@ -1420,7 +1435,7 @@ function MentoresScreen({ state, t, user, myName, mentorships, sharedTasks, refr
       <Header t={t} title="Mentores" subtitle="Colabora en tiempo real con otras cuentas"
         right={<button onClick={refresh} style={iconBtn(t, t.primary)}><RefreshCw size={18} /></button>} />
       <div style={{ display: "flex", gap: 6, padding: "0 20px 12px" }}>
-        {[["mios", "Mis mentores"], ["soy", "Soy mentor"], ["panel", "Panel"]].map(([k, l]) => (
+        {[["mios", "Mis mentores"], ["soy", "Mis aprendices"], ["panel", "Panel"]].map(([k, l]) => (
           <button key={k} onClick={() => setView(k)} style={{ flex: 1, padding: "9px 2px", borderRadius: 10,
             cursor: "pointer", fontWeight: 700, fontSize: 12, border: "none",
             background: view === k ? t.primary : t.surfaceAlt, color: view === k ? t.primaryFg : t.textMuted }}>{l}</button>
