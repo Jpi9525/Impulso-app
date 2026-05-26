@@ -709,7 +709,8 @@ function MainApp({ session }) {
       assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
     mentores: <MentoresScreen state={state} t={t} user={user} myName={myName}
       mentorships={mentorships} sharedTasks={sharedTasks} refresh={refreshMentor} />,
-    ajustes: <Ajustes state={state} patch={patch} t={t} reset={() => supabase.auth.signOut()} />,
+    ajustes: <Ajustes state={state} patch={patch} t={t} reset={() => supabase.auth.signOut()}
+      assignedToMe={assignedToMe} />,
   };
   const nav = [
     { k: "hoy", label: "Hoy", Icon: Home }, { k: "inbox", label: "Inbox", Icon: InboxIcon },
@@ -1779,11 +1780,15 @@ function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refr
 }
 const miniBtn = { padding: "8px 12px", fontSize: 12 };
 
-function Avatar({ name, color }) {
+function Avatar({ name, color, src, size = 38 }) {
+  if (src) return (
+    <img src={src} alt="" style={{ width: size, height: size, borderRadius: "50%",
+      objectFit: "cover", flexShrink: 0 }} />
+  );
   return (
-    <div style={{ width: 38, height: 38, borderRadius: "50%", background: color, color: "#fff",
+    <div style={{ width: size, height: size, borderRadius: "50%", background: color, color: "#fff",
       display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800,
-      textTransform: "uppercase", flexShrink: 0 }}>{(name || "?")[0]}</div>
+      fontSize: Math.round(size * 0.42), textTransform: "uppercase", flexShrink: 0 }}>{(name || "?")[0]}</div>
   );
 }
 
@@ -1855,8 +1860,54 @@ function GradeTask({ t, onClose, onSave }) {
 
 // PANEL: tareas designadas/asignadas de mentores y aprendices
 function PanelMentores({ t, user, asMentee, asMentor, tasksFor, openDetail }) {
+  let mTotal = 0, mDone = 0;
+  asMentor.forEach((m) => {
+    const ts = tasksFor(m.id);
+    mTotal += ts.length; mDone += ts.filter((x) => x.done).length;
+  });
+  const groupPct = mTotal ? Math.round((mDone / mTotal) * 100) : 0;
+
   return (
     <div style={{ padding: "0 20px 30px" }}>
+      {/* DASHBOARD DEL MENTOR */}
+      <PanelSection t={t} icon={<ClipboardList size={16} color={t.accent} />} title="Panel de tus aprendices">
+        {asMentor.length === 0 && <Empty t={t} text="Sin aprendices activos." />}
+        {asMentor.length > 0 && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <Stat t={t} big label="Cumplimiento del grupo" value={groupPct + "%"} />
+            <Stat t={t} label="Aprendices" value={asMentor.length} />
+            <Stat t={t} label="Tareas hechas" value={mDone} />
+          </div>
+        )}
+        {asMentor.map((m) => {
+          const ts = tasksFor(m.id);
+          const done = ts.filter((x) => x.done).length;
+          const pct = ts.length ? Math.round((done / ts.length) * 100) : 0;
+          const name = MentorAPI.counterpartName(m, user.id);
+          return (
+            <button key={m.id} onClick={() => openDetail({ title: `Tareas de ${name}`, tasks: ts })}
+              style={{ display: "block", width: "100%", textAlign: "left", cursor: "pointer",
+                background: t.surface, border: "none", borderRadius: 12, padding: 12,
+                marginBottom: 8, boxShadow: t.shadow }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Avatar name={name} color={t.accent} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, color: t.text, fontSize: 14 }}>{name}</div>
+                  <div style={{ fontSize: 11, color: t.faint }}>
+                    {ts.length} asignadas · {done} hechas · {ts.length - done} pendientes
+                  </div>
+                </div>
+                <span style={{ fontWeight: 800, color: t.accent, fontFamily: "var(--display)", fontSize: 17 }}>{pct}%</span>
+              </div>
+              <div style={{ height: 7, background: t.surfaceAlt, borderRadius: 6, marginTop: 9 }}>
+                <div style={{ width: pct + "%", height: "100%", background: t.accent, borderRadius: 6 }} />
+              </div>
+            </button>
+          );
+        })}
+      </PanelSection>
+
+      {/* COMO APRENDIZ */}
       <PanelSection t={t} icon={<UserCheck size={16} color={MENTOR_COLOR} />} title="Tus mentores te supervisan">
         {asMentee.length === 0 && <Empty t={t} text="Sin mentores activos." />}
         {asMentee.map((m) => {
@@ -1869,22 +1920,10 @@ function PanelMentores({ t, user, asMentee, asMentor, tasksFor, openDetail }) {
           );
         })}
       </PanelSection>
-      <PanelSection t={t} icon={<ClipboardList size={16} color={t.accent} />}
-        title="Tareas que asignaste a tus aprendices">
-        {asMentor.length === 0 && <Empty t={t} text="Sin aprendices activos." />}
-        {asMentor.map((m) => {
-          const tasks = tasksFor(m.id);
-          const name = MentorAPI.counterpartName(m, user.id);
-          return (
-            <PanelRow key={m.id} t={t} name={name} color={t.accent}
-              sub={`${tasks.length} asignada(s) · ${tasks.filter((x) => x.done).length} hechas`}
-              onClick={() => openDetail({ title: `Tareas de ${name}`, tasks })} />
-          );
-        })}
-      </PanelSection>
     </div>
   );
 }
+
 function PanelSection({ t, icon, title, children }) {
   return (
     <div style={{ marginBottom: 18 }}>
@@ -1933,7 +1972,83 @@ function DetailModal({ t, title, tasks, onClose }) {
 }
 
 /* ================================ AJUSTES ================================ */
-function Ajustes({ state, patch, t, reset }) {
+// reduce una imagen a un tamaño pequeño y la devuelve como dato (base64)
+function resizeImage(file, max = 256) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > h) { if (w > max) { h = h * max / w; w = max; } }
+        else { if (h > max) { w = w * max / h; h = max; } }
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function ProfileEditor({ state, patch, t, reset }) {
+  const [name, setName] = useState(state.profile.name || "");
+  const [avatar, setAvatar] = useState(state.profile.avatar || "");
+  const [saved, setSaved] = useState(false);
+  const fileRef = useRef(null);
+
+  const pickPhoto = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try { const data = await resizeImage(file); setAvatar(data); setSaved(false); }
+    catch (err) { alert("No se pudo cargar la imagen."); }
+  };
+  const save = () => {
+    patch((s) => ({ profile: { ...s.profile, name: name.trim() || s.profile.name, avatar } }));
+    setSaved(true);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginBottom: 16 }}>
+        <Avatar name={name} src={avatar} color={t.primary} size={84} />
+        <input ref={fileRef} type="file" accept="image/*" onChange={pickPhoto} style={{ display: "none" }} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn t={t} variant="soft" style={{ padding: "8px 14px", fontSize: 13 }}
+            onClick={() => fileRef.current && fileRef.current.click()}>
+            <Edit2 size={14} /> Cambiar foto
+          </Btn>
+          {avatar && <Btn t={t} variant="ghost" style={{ padding: "8px 14px", fontSize: 13 }}
+            onClick={() => { setAvatar(""); setSaved(false); }}>Quitar</Btn>}
+        </div>
+      </div>
+      <Field label="Nombre de perfil" t={t}>
+        <input style={inputStyle(t)} value={name}
+          onChange={(e) => { setName(e.target.value); setSaved(false); }} placeholder="Tu nombre" />
+      </Field>
+      <Info t={t} label="Correo" value={state.profile.email} />
+      <Info t={t} label="Zona horaria" value={state.profile.timezone} />
+      <Btn t={t} full onClick={save} style={{ marginTop: 12 }}>
+        {saved ? "✓ Cambios guardados" : "Guardar cambios"}
+      </Btn>
+      <p style={{ fontSize: 11, color: t.faint, lineHeight: 1.6, marginTop: 14 }}>
+        Tu identidad se guarda separada de tus hábitos. Los mentores solo ven las tareas que tú compartes.
+      </p>
+      <Btn t={t} variant="ghost" full style={{ marginTop: 6 }} onClick={reset}>
+        <LogOut size={16} /> Cerrar sesión</Btn>
+      <Btn t={t} variant="danger" full style={{ marginTop: 10 }}
+        onClick={() => { if (window.confirm("¿Borrar la cuenta y todos los datos?")) reset(); }}>
+        <Trash2 size={16} /> Borrar cuenta y datos</Btn>
+    </div>
+  );
+}
+
+
+function Ajustes({ state, patch, t, reset, assignedToMe = [] }) {
   const [panel, setPanel] = useState(null);
   const setClassifications = (fn) => patch((s) => ({
     classifications: typeof fn === "function" ? fn(s.classifications) : fn }));
@@ -1944,7 +2059,7 @@ function Ajustes({ state, patch, t, reset }) {
     { k: "google", label: "Sincronizar Google Calendar", icon: <CalendarIcon size={18} /> },
     { k: "notif", label: "Notificaciones y voz", icon: <Bell size={18} /> },
     { k: "plan", label: "Suscripción", icon: <Crown size={18} /> },
-    { k: "cuenta", label: "Cuenta y privacidad", icon: <Shield size={18} /> },
+    { k: "cuenta", label: "Mi perfil", icon: <Shield size={18} /> },
   ];
   return (
     <div>
@@ -1952,7 +2067,7 @@ function Ajustes({ state, patch, t, reset }) {
       <div style={{ padding: "0 20px 30px" }}>
         <div style={{ background: t.surface, borderRadius: 14, padding: 14, boxShadow: t.shadow,
           display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-          <Avatar name={state.profile.name} color={t.primary} />
+          <Avatar name={state.profile.name} src={state.profile.avatar} color={t.primary} />
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 800, color: t.text }}>{state.profile.name}</div>
             <div style={{ fontSize: 12, color: t.faint }}>{state.profile.email}</div>
@@ -1975,7 +2090,7 @@ function Ajustes({ state, patch, t, reset }) {
       </div>
 
       {panel === "dashboard" && <Modal open onClose={() => setPanel(null)} t={t} title="Panel de progreso">
-        <Dashboard state={state} t={t} /></Modal>}
+        <Dashboard state={state} t={t} assignedToMe={assignedToMe} /></Modal>}
 
       {panel === "estilo" && <Modal open onClose={() => setPanel(null)} t={t} title="Estilo de la app">
         {Object.entries(THEMES).map(([key, th]) => (
@@ -2019,18 +2134,8 @@ function Ajustes({ state, patch, t, reset }) {
       {panel === "plan" && <Modal open onClose={() => setPanel(null)} t={t} title="Suscripción">
         <Paywall state={state} patch={patch} t={t} /></Modal>}
 
-      {panel === "cuenta" && <Modal open onClose={() => setPanel(null)} t={t} title="Cuenta y privacidad">
-        <Info t={t} label="Nombre" value={state.profile.name} />
-        <Info t={t} label="Correo" value={state.profile.email} />
-        <Info t={t} label="Método" value={state.profile.authMethod} />
-        <Info t={t} label="Zona horaria" value={state.profile.timezone} />
-        <p style={{ fontSize: 12, color: t.faint, lineHeight: 1.6, marginTop: 14 }}>
-          Tu identidad se guarda separada de tus hábitos. Los mentores solo ven las tareas que tú compartes.
-        </p>
-        <Btn t={t} variant="ghost" full style={{ marginTop: 10 }} onClick={reset}><LogOut size={16} /> Cerrar sesión</Btn>
-        <Btn t={t} variant="danger" full style={{ marginTop: 10 }}
-          onClick={() => { if (window.confirm("¿Borrar la cuenta y todos los datos?")) reset(); }}>
-          <Trash2 size={16} /> Borrar cuenta y datos</Btn>
+      {panel === "cuenta" && <Modal open onClose={() => setPanel(null)} t={t} title="Mi perfil">
+        <ProfileEditor state={state} patch={patch} t={t} reset={reset} />
       </Modal>}
     </div>
   );
@@ -2060,26 +2165,82 @@ function Info({ t, label, value }) {
 }
 
 /* ============================== DASHBOARD ================================ */
-function Dashboard({ state, t }) {
-  const week = Array.from({ length: 7 }, (_, i) => addDays(todayISO(), -i));
+function Dashboard({ state, t, assignedToMe = [] }) {
+  const [period, setPeriod] = useState("semana");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const today = todayISO();
+
+  const days = (() => {
+    if (period === "rango" && from && to) {
+      const out = []; let d = from, guard = 0;
+      while (d <= to && guard < 400) { out.push(d); d = addDays(d, 1); guard++; }
+      return out;
+    }
+    const n = period === "semana" ? 7 : period === "mes" ? 31 : 365;
+    return Array.from({ length: n }, (_, i) => addDays(today, -i));
+  })();
+  const daySet = new Set(days);
+
   let total = 0, done = 0;
   const byClass = state.classifications.map((c) => {
     let ct = 0, cd = 0;
     state.tasks.filter((x) => x.classificationId === c.id).forEach((x) => {
-      week.forEach((d) => { if (occursOn(x, d)) { ct++; total++; if (isDoneOn(x, d)) { cd++; done++; } } });
+      days.forEach((d) => { if (occursOn(x, d)) { ct++; total++; if (isDoneOn(x, d)) { cd++; done++; } } });
     });
     return { c, total: ct, done: cd, pct: ct ? Math.round((cd / ct) * 100) : 0 };
   }).filter((x) => x.total > 0);
   const pct = total ? Math.round((done / total) * 100) : 0;
+
+  const mentorWin = assignedToMe.filter((x) => x.date && daySet.has(x.date));
+  const mentorDone = mentorWin.filter((x) => x.done).length;
+  const mentorPct = mentorWin.length ? Math.round((mentorDone / mentorWin.length) * 100) : 0;
+
   return (
     <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {[["semana", "Semana"], ["mes", "Mes"], ["anio", "Año"], ["rango", "Rango"]].map(([k, l]) => (
+          <button key={k} onClick={() => setPeriod(k)} style={chip(t, period === k)}>{l}</button>
+        ))}
+      </div>
+      {period === "rango" && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <label style={{ flex: 1 }}>
+            <span style={{ fontSize: 11, color: t.faint }}>Desde</span>
+            <input type="date" style={inputStyle(t)} value={from} onChange={(e) => setFrom(e.target.value)} />
+          </label>
+          <label style={{ flex: 1 }}>
+            <span style={{ fontSize: 11, color: t.faint }}>Hasta</span>
+            <input type="date" style={inputStyle(t)} value={to} onChange={(e) => setTo(e.target.value)} />
+          </label>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-        <Stat t={t} big label="Cumplimiento semanal" value={pct + "%"} />
+        <Stat t={t} big label="Cumplimiento" value={pct + "%"} />
         <Stat t={t} label="Completadas" value={done} />
         <Stat t={t} label="Programadas" value={total} />
       </div>
+
+      {/* progreso con tus mentores */}
+      <div style={{ background: MENTOR_COLOR + "12", borderRadius: 14, padding: 14, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+          <UserCheck size={16} color={MENTOR_COLOR} />
+          <h4 style={{ margin: 0, color: MENTOR_COLOR, fontFamily: "var(--display)", fontSize: 15 }}>
+            Encargos de tus mentores
+          </h4>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+          <span style={{ color: t.text, fontWeight: 700 }}>{mentorDone} de {mentorWin.length} cumplidos</span>
+          <span style={{ color: MENTOR_COLOR, fontWeight: 800 }}>{mentorPct}%</span>
+        </div>
+        <div style={{ height: 8, background: t.surface, borderRadius: 6 }}>
+          <div style={{ width: mentorPct + "%", height: "100%", background: MENTOR_COLOR, borderRadius: 6 }} />
+        </div>
+      </div>
+
       <h4 style={{ margin: "4px 0 10px", color: t.text, fontFamily: "var(--display)", fontSize: 15 }}>Por clasificación</h4>
-      {byClass.length === 0 && <Empty t={t} text="Aún no hay datos esta semana." />}
+      {byClass.length === 0 && <Empty t={t} text="Sin datos en este periodo." />}
       {byClass.map(({ c, total, done, pct }) => (
         <div key={c.id} style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
@@ -2094,6 +2255,7 @@ function Dashboard({ state, t }) {
     </div>
   );
 }
+
 function Stat({ t, label, value, big }) {
   return (
     <div style={{ flex: big ? 1.4 : 1, background: t.surfaceAlt, borderRadius: 12, padding: 12 }}>
