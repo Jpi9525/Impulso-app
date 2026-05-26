@@ -541,8 +541,12 @@ function AuthScreen() {
 
   const submit = async () => {
     setErr(""); setInfo("");
-    if (!email.trim() || pass.length < 6) {
-      setErr("Escribe un correo y una contraseña de al menos 6 caracteres.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setErr("Escribe un correo válido (ej. nombre@correo.com).");
+      return;
+    }
+    if (pass.length < 6) {
+      setErr("La contraseña debe tener al menos 6 caracteres.");
       return;
     }
     setBusy(true);
@@ -693,7 +697,11 @@ function MainApp({ session }) {
   const t = THEMES[state.theme || "profesional"].t;
   const patch = (p) => setState((s) => ({ ...s, ...(typeof p === "function" ? p(s) : p) }));
   const myName = (state.profile && state.profile.name) || (user.email || "Tú");
-  const assignedToMe = sharedTasks.filter((x) => x.owner_id === user.id);
+  // encargos reales de un mentor (no los que yo mismo comparti)
+  const assignedToMe = sharedTasks.filter((x) => x.owner_id === user.id && x.creator_id !== user.id);
+  const myMentorships = mentorships
+    .filter((m) => m.status === "active" && MentorAPI.myRole(m, user.id) === "mentee")
+    .map((m) => ({ id: m.id, name: MentorAPI.counterpartName(m, user.id) }));
 
   const toggleShared = async (taskId, done) => {
     setSharedTasks((ts) => ts.map((x) => (x.id === taskId ? { ...x, done } : x)));
@@ -701,9 +709,22 @@ function MainApp({ session }) {
     catch (e) { console.error(e.message); refreshMentor(); }
   };
 
+  // compartir una tarea propia con un mentor para que la supervise
+  const shareTask = async (taskLike, mentorshipId) => {
+    const c = state.classifications.find((x) => x.id === taskLike.classificationId);
+    await MentorAPI.assignSharedTask({
+      mentorship_id: mentorshipId, owner_id: user.id, creator_id: user.id, creator_name: myName,
+      title: taskLike.title, classification: c ? c.name : null,
+      color: c ? c.color : MENTOR_COLOR, date: taskLike.date || null, time: taskLike.time || null,
+      status: "pendiente", done: false,
+    });
+    refreshMentor();
+  };
+
   const screens = {
     hoy: <Hoy state={state} patch={patch} t={t} go={setTab}
-      assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
+      assignedToMe={assignedToMe} onToggleShared={toggleShared}
+      myMentorships={myMentorships} shareTask={shareTask} />,
     inbox: <InboxScreen state={state} patch={patch} t={t} />,
     cal: <CalendarScreen state={state} patch={patch} t={t}
       assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
@@ -749,7 +770,8 @@ function Header({ title, t, subtitle, right }) {
 }
 
 /* ================================== HOY ================================== */
-function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
+function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared,
+  myMentorships = [], shareTask }) {
   const [editor, setEditor] = useState(null);
   const [mode, setMode] = useState("hoy");
   const [openGroups, setOpenGroups] = useState({});
@@ -983,7 +1005,8 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared }) {
         </>)}
       </div>
 
-      {editor && <TaskEditor task={editor} state={state} patch={patch} t={t} onClose={() => setEditor(null)} />}
+      {editor && <TaskEditor task={editor} state={state} patch={patch} t={t}
+        myMentorships={myMentorships} shareTask={shareTask} onClose={() => setEditor(null)} />}
     </div>
   );
 }
@@ -1031,7 +1054,7 @@ function recurLabel(task) {
 }
 
 /* ============================ EDITOR DE TAREA ============================ */
-function TaskEditor({ task, state, patch, t, onClose }) {
+function TaskEditor({ task, state, patch, t, onClose, myMentorships = [], shareTask }) {
   const isNew = !task.id;
   const anchor = task.date || todayISO();
   const [title, setTitle] = useState(task.title || "");
@@ -1047,7 +1070,8 @@ function TaskEditor({ task, state, patch, t, onClose }) {
   const [subs, setSubs] = useState(task.subtasks || []);
   const [newSub, setNewSub] = useState("");
   const [autoTouched, setAutoTouched] = useState(!isNew);
-  const mentors = (state.mentors || []).filter((m) => m.status === "active");
+  const [sharedSet, setSharedSet] = useState(task.sharedMentorships || []);
+  const [sharing, setSharing] = useState(null);
 
   useEffect(() => {
     if (!autoTouched && title.trim()) setClassificationId(autoClassify(title, state.classifications));
@@ -1074,6 +1098,7 @@ function TaskEditor({ task, state, patch, t, onClose }) {
       recurrenceDays: recurrence === "custom" ? recurrenceDays : [],
       subtasks: subs, completedDates, createdAt: task.createdAt || Date.now(),
       source: task.source || "manual", assignedBy: task.assignedBy, watcherMentorId,
+      sharedMentorships: sharedSet,
     };
     patch((s) => ({ tasks: isNew ? [...s.tasks, payload] : s.tasks.map((x) => x.id === task.id ? payload : x) }));
     onClose();
@@ -1126,14 +1151,32 @@ function TaskEditor({ task, state, patch, t, onClose }) {
           </div>
         )}
       </Field>
-      {mentors.length > 0 && (
-        <Field label="Mentor que supervisa esta tarea (opcional)" t={t}>
+      {myMentorships.length > 0 && (
+        <Field label="Compartir con un mentor" t={t}>
+          <div style={{ fontSize: 11, color: t.faint, marginBottom: 6 }}>
+            El mentor podrá ver esta tarea y si la cumpliste.
+          </div>
           <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
-            <button onClick={() => setWatcherMentorId(null)} style={chip(t, !watcherMentorId)}>Ninguno</button>
-            {mentors.map((m) => (
-              <button key={m.id} onClick={() => setWatcherMentorId(m.id)}
-                style={chip(t, watcherMentorId === m.id, MENTOR_COLOR)}>{m.name}</button>
-            ))}
+            {myMentorships.map((m) => {
+              const already = sharedSet.includes(m.id);
+              const blocked = already || sharing === m.id || !title.trim();
+              return (
+                <button key={m.id} disabled={blocked}
+                  onClick={async () => {
+                    setSharing(m.id);
+                    try {
+                      await shareTask({ title: title.trim(), classificationId, date, time }, m.id);
+                      setSharedSet((s) => [...s, m.id]);
+                    } catch (e) { alert("No se pudo compartir: " + e.message); }
+                    setSharing(null);
+                  }}
+                  style={{ ...chip(t, already, MENTOR_COLOR),
+                    cursor: blocked ? "default" : "pointer",
+                    opacity: (!title.trim() && !already) ? 0.5 : 1 }}>
+                  {already ? `✓ ${m.name}` : sharing === m.id ? "Compartiendo…" : m.name}
+                </button>
+              );
+            })}
           </div>
         </Field>
       )}
