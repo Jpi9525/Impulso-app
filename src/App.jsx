@@ -642,6 +642,9 @@ function MainApp({ session }) {
   const [tab, setTab] = useState("hoy");
   const [mentorships, setMentorships] = useState([]);
   const [sharedTasks, setSharedTasks] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   // cargar el estado personal del usuario
   useEffect(() => {
@@ -660,22 +663,50 @@ function MainApp({ session }) {
   // traer mentorías + tareas compartidas
   const refreshMentor = useCallback(async () => {
     try {
-      const [ms, ts] = await Promise.all([
-        MentorAPI.listMentorships(), MentorAPI.listSharedTasks(),
+      const [ms, ts, gs] = await Promise.all([
+        MentorAPI.listMentorships(), MentorAPI.listSharedTasks(), MentorAPI.listGroups(),
       ]);
-      setMentorships(ms); setSharedTasks(ts);
+      setMentorships(ms); setSharedTasks(ts); setGroups(gs);
     } catch (e) { console.error("refreshMentor:", e.message); }
   }, []);
-  useEffect(() => { refreshMentor(); }, [refreshMentor]);
+
+  const refreshNotifs = useCallback(async () => {
+    try {
+      const ns = await MentorAPI.listNotifications();
+      setNotifications(ns);
+    } catch (e) { console.error("refreshNotifs:", e.message); }
+  }, []);
+  useEffect(() => { refreshMentor(); refreshNotifs(); }, [refreshMentor, refreshNotifs]);
 
   // tiempo real: refrescar cuando cambian mentorías o tareas compartidas
   useEffect(() => {
     const ch = supabase.channel("impulso-rt")
       .on("postgres_changes", { event: "*", schema: "public", table: "mentorships" }, refreshMentor)
       .on("postgres_changes", { event: "*", schema: "public", table: "shared_tasks" }, refreshMentor)
+      .on("postgres_changes", { event: "*", schema: "public", table: "mentor_groups" }, refreshMentor)
+      .on("postgres_changes", { event: "*", schema: "public", table: "group_members" }, refreshMentor)
+      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, refreshNotifs)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [refreshMentor]);
+  }, [refreshMentor, refreshNotifs]);
+
+  // generar alerta para tareas que vencen mañana (una vez por sesion)
+  const dueScanned = useRef(false);
+  useEffect(() => {
+    if (!loaded || !state || dueScanned.current) return;
+    dueScanned.current = true;
+    const tomorrow = addDays(todayISO(), 1);
+    const dueTomorrow = (state.tasks || []).filter((x) =>
+      x.date === tomorrow && !(x.completedDates || []).includes(tomorrow));
+    dueTomorrow.forEach((task) => {
+      const already = notifications.some((n) => n.kind === "due_soon" && (n.body || "") === task.title);
+      if (already) return;
+      MentorAPI.createNotification({
+        userId: user.id, kind: "due_soon",
+        title: "Tarea por vencer mañana", body: task.title,
+      }).catch(() => {});
+    });
+  }, [loaded, state, notifications]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const css = `@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
     :root{--body:'Plus Jakarta Sans',system-ui,sans-serif;--display:'Fraunces',Georgia,serif;}
@@ -712,13 +743,14 @@ function MainApp({ session }) {
   // compartir una tarea propia con un mentor para que la supervise
   const shareTask = async (taskLike, mentorshipId) => {
     const c = state.classifications.find((x) => x.id === taskLike.classificationId);
-    await MentorAPI.assignSharedTask({
+    const created = await MentorAPI.assignSharedTask({
       mentorship_id: mentorshipId, owner_id: user.id, creator_id: user.id, creator_name: myName,
       title: taskLike.title, classification: c ? c.name : null,
       color: c ? c.color : MENTOR_COLOR, date: taskLike.date || null, time: taskLike.time || null,
       status: "pendiente", done: false,
     });
     refreshMentor();
+    return created;
   };
 
   const screens = {
@@ -729,7 +761,7 @@ function MainApp({ session }) {
     cal: <CalendarScreen state={state} patch={patch} t={t}
       assignedToMe={assignedToMe} onToggleShared={toggleShared} />,
     mentores: <MentoresScreen state={state} t={t} user={user} myName={myName}
-      mentorships={mentorships} sharedTasks={sharedTasks} refresh={refreshMentor} />,
+      mentorships={mentorships} sharedTasks={sharedTasks} groups={groups} refresh={refreshMentor} />,
     ajustes: <Ajustes state={state} patch={patch} t={t} reset={() => supabase.auth.signOut()}
       assignedToMe={assignedToMe} />,
   };
@@ -742,6 +774,10 @@ function MainApp({ session }) {
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100vh",
       background: t.bg, fontFamily: "var(--body)" }}>
       <div className="imp-shell" style={{ background: t.bg, color: t.text }}>
+        <NotifBell notifications={notifications} user={user} t={t}
+          onOpen={() => setNotifOpen(true)} />
+        <NotifPanel open={notifOpen} onClose={() => setNotifOpen(false)}
+          notifications={notifications} user={user} t={t} refresh={refreshNotifs} />
         <div className="imp-page" style={{ flex: 1, overflowY: "auto" }}>{screens[tab]}</div>
         <nav style={{ display: "flex", background: t.surface, borderTop: `1px solid ${t.border}`, padding: "6px 4px 8px" }}>
           {nav.map(({ k, label, Icon }) => (
@@ -793,15 +829,23 @@ function Hoy({ state, patch, t, go, assignedToMe = [], onToggleShared,
   const ownTasks = todays;
 
   // marcar/desmarcar tarea en un día + sincronizar subtareas
-  const toggleDone = (task, iso) => patch((s) => ({
-    tasks: s.tasks.map((x) => {
-      if (x.id !== task.id) return x;
-      const has = (x.completedDates || []).includes(iso);
-      const dates = has ? x.completedDates.filter((d) => d !== iso) : [...(x.completedDates || []), iso];
-      const subtasks = (x.subtasks || []).map((su) => ({ ...su, done: !has }));
-      return { ...x, completedDates: dates, subtasks, status: has ? "pendiente" : x.status };
-    }),
-  }));
+  const toggleDone = async (task, iso) => {
+    const has = (task.completedDates || []).includes(iso);
+    patch((s) => ({
+      tasks: s.tasks.map((x) => {
+        if (x.id !== task.id) return x;
+        const dates = has ? x.completedDates.filter((d) => d !== iso) : [...(x.completedDates || []), iso];
+        const subtasks = (x.subtasks || []).map((su) => ({ ...su, done: !has }));
+        return { ...x, completedDates: dates, subtasks, status: has ? "pendiente" : x.status };
+      }),
+    }));
+    // sincronizar copias compartidas con mentores
+    for (const c of (task.sharedCopies || [])) {
+      if (!c.sharedTaskId) continue;
+      try { await MentorAPI.updateSharedTask(c.sharedTaskId, { done: !has }); }
+      catch (e) {}
+    }
+  };
 
   const captureVoice = () => {
     setVoiceMsg("");
@@ -1070,7 +1114,10 @@ function TaskEditor({ task, state, patch, t, onClose, myMentorships = [], shareT
   const [subs, setSubs] = useState(task.subtasks || []);
   const [newSub, setNewSub] = useState("");
   const [autoTouched, setAutoTouched] = useState(!isNew);
-  const [sharedSet, setSharedSet] = useState(task.sharedMentorships || []);
+  const [sharedCopies, setSharedCopies] = useState(
+    task.sharedCopies ||
+    (task.sharedMentorships || []).map((mid) => ({ mentorshipId: mid, sharedTaskId: null }))
+  );
   const [sharing, setSharing] = useState(null);
 
   useEffect(() => {
@@ -1087,7 +1134,7 @@ function TaskEditor({ task, state, patch, t, onClose, myMentorships = [], shareT
     if (subs.length) setSubs(subs.map((s) => ({ ...s, done: v })));
   };
 
-  const save = () => {
+  const save = async () => {
     let completedDates = (task.completedDates || []).filter((d) => d !== anchor);
     const finalDone = subs.length ? subs.every((s) => s.done) : done;
     if (finalDone) completedDates = [...completedDates, anchor];
@@ -1098,9 +1145,19 @@ function TaskEditor({ task, state, patch, t, onClose, myMentorships = [], shareT
       recurrenceDays: recurrence === "custom" ? recurrenceDays : [],
       subtasks: subs, completedDates, createdAt: task.createdAt || Date.now(),
       source: task.source || "manual", assignedBy: task.assignedBy, watcherMentorId,
-      sharedMentorships: sharedSet,
+      sharedCopies,
     };
     patch((s) => ({ tasks: isNew ? [...s.tasks, payload] : s.tasks.map((x) => x.id === task.id ? payload : x) }));
+    // sincronizar cambios con las copias compartidas
+    for (const c of sharedCopies) {
+      if (!c.sharedTaskId) continue;
+      try {
+        await MentorAPI.updateSharedTask(c.sharedTaskId, {
+          title: payload.title, date: payload.date || null, time: payload.time || null,
+          done: finalDone,
+        });
+      } catch (e) {}
+    }
     onClose();
   };
   const del = () => { patch((s) => ({ tasks: s.tasks.filter((x) => x.id !== task.id) })); onClose(); };
@@ -1158,15 +1215,15 @@ function TaskEditor({ task, state, patch, t, onClose, myMentorships = [], shareT
           </div>
           <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
             {myMentorships.map((m) => {
-              const already = sharedSet.includes(m.id);
+              const already = sharedCopies.some((c) => c.mentorshipId === m.id);
               const blocked = already || sharing === m.id || !title.trim();
               return (
                 <button key={m.id} disabled={blocked}
                   onClick={async () => {
                     setSharing(m.id);
                     try {
-                      await shareTask({ title: title.trim(), classificationId, date, time }, m.id);
-                      setSharedSet((s) => [...s, m.id]);
+                      const created = await shareTask({ title: title.trim(), classificationId, date, time }, m.id);
+                      setSharedCopies((s) => [...s, { mentorshipId: m.id, sharedTaskId: created && created.id }]);
                     } catch (e) { alert("No se pudo compartir: " + e.message); }
                     setSharing(null);
                   }}
@@ -1540,7 +1597,76 @@ function CalendarScreen({ state, patch, t, assignedToMe = [], onToggleShared }) 
 // Versión multiusuario real: las mentorías y las tareas compartidas viven en
 // Supabase y se sincronizan en tiempo real entre cuentas distintas.
 
-function MentoresScreen({ state, t, user, myName, mentorships, sharedTasks, refresh }) {
+function NotifBell({ notifications, user, t, onOpen }) {
+  const unread = notifications.filter((n) => !n.is_read).length;
+  return (
+    <button onClick={onOpen} style={{ position: "absolute", top: 22, right: 18, zIndex: 5,
+      background: "none", border: "none", cursor: "pointer", padding: 6, color: t.text }}>
+      <Bell size={22} />
+      {unread > 0 && (
+        <span style={{ position: "absolute", top: 2, right: 2, minWidth: 16, height: 16, padding: "0 4px",
+          background: t.danger, color: "#fff", borderRadius: 8, fontSize: 10, fontWeight: 800,
+          display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {unread > 9 ? "9+" : unread}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function NotifPanel({ open, onClose, notifications, user, t, refresh }) {
+  if (!open) return null;
+  const sinceText = (iso) => {
+    const ms = Date.now() - new Date(iso).getTime();
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return "ahora";
+    if (m < 60) return m + " min";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + " h";
+    return Math.floor(h / 24) + " d";
+  };
+  const iconFor = (kind) => kind === "mentor_task"
+    ? <UserCheck size={16} color={MENTOR_COLOR} />
+    : kind === "due_soon" ? <Clock size={16} color={t.accent} />
+    : <Bell size={16} color={t.primary} />;
+  const markRead = async (n) => {
+    if (!n.is_read) { try { await MentorAPI.markNotifRead(n.id); refresh(); } catch (e) {} }
+  };
+  const remove = async (n) => {
+    try { await MentorAPI.deleteNotification(n.id); refresh(); } catch (e) {}
+  };
+  const allRead = async () => {
+    try { await MentorAPI.markAllRead(user.id); refresh(); } catch (e) {}
+  };
+  return (
+    <Modal open onClose={onClose} t={t} title="Notificaciones">
+      {notifications.length === 0 && <Empty t={t} text="Sin alertas por ahora." />}
+      {notifications.length > 0 && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+          <button onClick={allRead} style={{ background: "none", border: "none", cursor: "pointer",
+            color: t.primary, fontSize: 12, fontWeight: 700 }}>Marcar todas leídas</button>
+        </div>
+      )}
+      {notifications.map((n) => (
+        <div key={n.id} onClick={() => markRead(n)} style={{ display: "flex", gap: 9, alignItems: "flex-start",
+          background: n.is_read ? t.surfaceAlt : t.surface, borderRadius: 12, padding: 11, marginBottom: 7,
+          cursor: "pointer", borderLeft: n.is_read ? "none" : `3px solid ${t.primary}` }}>
+          <div style={{ marginTop: 2 }}>{iconFor(n.kind)}</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, color: t.text, fontSize: 13 }}>{n.title}</div>
+            {n.body && <div style={{ fontSize: 12, color: t.textMuted, marginTop: 2 }}>{n.body}</div>}
+            <div style={{ fontSize: 10, color: t.faint, marginTop: 4 }}>{sinceText(n.created_at)}</div>
+          </div>
+          <button onClick={(e) => { e.stopPropagation(); remove(n); }} style={iconBtn(t, t.faint)}>
+            <X size={14} />
+          </button>
+        </div>
+      ))}
+    </Modal>
+  );
+}
+
+function MentoresScreen({ state, t, user, myName, mentorships, sharedTasks, groups = [], refresh }) {
   const [view, setView] = useState("mios");
   const [detail, setDetail] = useState(null);
 
@@ -1571,7 +1697,8 @@ function MentoresScreen({ state, t, user, myName, mentorships, sharedTasks, refr
       {view === "soy" && (
         <SoyMentor t={t} user={user} myName={myName} state={state} relations={asMentor}
           incoming={incoming.filter((m) => m.inviter_role === "mentee")}
-          tasksFor={tasksFor} refresh={refresh} openDetail={setDetail} />
+          tasksFor={tasksFor} refresh={refresh} openDetail={setDetail}
+          groups={groups} />
       )}
       {view === "panel" && (
         <PanelMentores t={t} user={user} asMentee={asMentee} asMentor={asMentor}
@@ -1677,12 +1804,14 @@ function MisMentores({ t, user, myName, relations, incoming, tasksFor, refresh, 
   );
 }
 
-function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refresh, openDetail }) {
+function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refresh, openDetail, groups = [] }) {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [assigning, setAssigning] = useState(null);
+  const [assigning, setAssigning] = useState(null);       // { mentorshipObj } for one mentee
+  const [groupAssigning, setGroupAssigning] = useState(null); // { groupObj } for group
   const [grading, setGrading] = useState(null);
+  const [editingGroup, setEditingGroup] = useState(null); // { id?, name, mentorshipIds[] }
 
   const invite = async () => {
     if (!email.trim()) return;
@@ -1704,21 +1833,70 @@ function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refr
   const drop = async (m) => {
     try { await MentorAPI.removeMentorship(m.id); refresh(); } catch (e) { alert(e.message); }
   };
+
+  // asignar tarea a un solo aprendiz + alerta
   const doAssign = async (m, form) => {
     const c = state.classifications.find((x) => x.name === form.classification);
+    const menteeId = MentorAPI.menteeId(m);
     try {
       await MentorAPI.assignSharedTask({
-        mentorship_id: m.id, owner_id: MentorAPI.menteeId(m), creator_id: user.id,
+        mentorship_id: m.id, owner_id: menteeId, creator_id: user.id,
         creator_name: myName, title: form.title, classification: form.classification,
         color: c ? c.color : MENTOR_COLOR, date: form.date || null, time: form.time || null,
         status: "pendiente", done: false,
       });
+      await MentorAPI.createNotification({
+        userId: menteeId, kind: "mentor_task",
+        title: `Nueva tarea de ${myName}`, body: form.title,
+      });
       setAssigning(null); refresh();
     } catch (e) { alert(e.message); }
   };
+
+  // asignar a TODOS los miembros del grupo
+  const doGroupAssign = async (g, form) => {
+    const c = state.classifications.find((x) => x.name === form.classification);
+    const members = (g.group_members || []);
+    if (members.length === 0) { alert("Este grupo no tiene aprendices."); return; }
+    try {
+      for (const gm of members) {
+        const m = relations.find((r) => r.id === gm.mentorship_id);
+        if (!m) continue;
+        const menteeId = MentorAPI.menteeId(m);
+        await MentorAPI.assignSharedTask({
+          mentorship_id: m.id, owner_id: menteeId, creator_id: user.id,
+          creator_name: myName, title: form.title, classification: form.classification,
+          color: c ? c.color : MENTOR_COLOR, date: form.date || null, time: form.time || null,
+          status: "pendiente", done: false,
+        });
+        await MentorAPI.createNotification({
+          userId: menteeId, kind: "mentor_task",
+          title: `Nueva tarea de ${myName}`, body: form.title,
+        });
+      }
+      setGroupAssigning(null); refresh();
+    } catch (e) { alert(e.message); }
+  };
+
   const doGrade = async (task, g) => {
     try { await MentorAPI.updateSharedTask(task.id, g); setGrading(null); refresh(); }
     catch (e) { alert(e.message); }
+  };
+
+  const saveGroup = async (g) => {
+    try {
+      let id = g.id;
+      if (!id) {
+        const created = await MentorAPI.createGroup({ ownerId: user.id, name: g.name.trim() });
+        id = created.id;
+      }
+      await MentorAPI.setGroupMembers(id, g.mentorshipIds);
+      setEditingGroup(null); refresh();
+    } catch (e) { alert(e.message); }
+  };
+  const deleteGroup = async (id) => {
+    if (!window.confirm("¿Eliminar este grupo?")) return;
+    try { await MentorAPI.deleteGroup(id); refresh(); } catch (e) { alert(e.message); }
   };
 
   return (
@@ -1754,6 +1932,56 @@ function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refr
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ====================== GRUPOS DE APRENDICES ====================== */}
+      {relations.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+            <h3 style={{ fontFamily: "var(--display)", fontSize: 15, margin: 0, color: t.text, flex: 1 }}>
+              Grupos
+            </h3>
+            <Btn t={t} variant="soft" style={miniBtn}
+              onClick={() => setEditingGroup({ name: "", mentorshipIds: [] })}>
+              <Plus size={14} /> Crear grupo
+            </Btn>
+          </div>
+          {groups.length === 0 && (
+            <div style={{ fontSize: 12, color: t.faint, padding: "6px 0" }}>
+              Sin grupos. Crea uno para enviar tareas a varios aprendices a la vez.
+            </div>
+          )}
+          {groups.map((g) => {
+            const memberCount = (g.group_members || []).length;
+            return (
+              <div key={g.id} style={{ background: t.surface, borderRadius: 12, padding: 11,
+                boxShadow: t.shadow, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, color: t.text, fontSize: 14 }}>{g.name}</div>
+                    <div style={{ fontSize: 11, color: t.faint }}>{memberCount} aprendiz(es)</div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 9, flexWrap: "wrap" }}>
+                  <Btn t={t} style={{ padding: "7px 12px", fontSize: 12 }}
+                    onClick={() => setGroupAssigning(g)} disabled={memberCount === 0}>
+                    <Send size={13} /> Asignar tarea al grupo
+                  </Btn>
+                  <Btn t={t} variant="soft" style={miniBtn}
+                    onClick={() => setEditingGroup({
+                      id: g.id, name: g.name,
+                      mentorshipIds: (g.group_members || []).map((x) => x.mentorship_id),
+                    })}>
+                    <Edit2 size={13} /> Editar
+                  </Btn>
+                  <Btn t={t} variant="danger" style={miniBtn} onClick={() => deleteGroup(g.id)}>
+                    <Trash2 size={13} />
+                  </Btn>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -1811,16 +2039,63 @@ function SoyMentor({ t, user, myName, state, relations, incoming, tasksFor, refr
           </div>
         );
       })}
+
       {assigning && (
         <AssignTask t={t} classifications={state.classifications} onClose={() => setAssigning(null)}
           onSave={(form) => doAssign(assigning, form)} />
       )}
+      {groupAssigning && (
+        <AssignTask t={t} classifications={state.classifications} onClose={() => setGroupAssigning(null)}
+          onSave={(form) => doGroupAssign(groupAssigning, form)} />
+      )}
       {grading && (
         <GradeTask t={t} onClose={() => setGrading(null)} onSave={(g) => doGrade(grading, g)} />
+      )}
+      {editingGroup && (
+        <GroupEditor t={t} group={editingGroup} relations={relations} user={user}
+          onCancel={() => setEditingGroup(null)} onSave={saveGroup} />
       )}
     </div>
   );
 }
+
+function GroupEditor({ t, group, relations, user, onCancel, onSave }) {
+  const [name, setName] = useState(group.name || "");
+  const [ids, setIds] = useState(group.mentorshipIds || []);
+  const toggle = (id) => setIds((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+  return (
+    <Modal open onClose={onCancel} t={t} title={group.id ? "Editar grupo" : "Nuevo grupo"}>
+      <Field label="Nombre del grupo" t={t}>
+        <input style={inputStyle(t)} value={name} autoFocus
+          onChange={(e) => setName(e.target.value)} placeholder="Ej. Aprendices avanzados" />
+      </Field>
+      <Field label="Miembros del grupo" t={t}>
+        {relations.length === 0 && <Empty t={t} text="Aún no tienes aprendices activos." />}
+        {relations.map((m) => {
+          const nm = MentorAPI.counterpartName(m, user.id);
+          const on = ids.includes(m.id);
+          return (
+            <button key={m.id} onClick={() => toggle(m.id)} style={{ display: "flex", alignItems: "center",
+              gap: 10, width: "100%", padding: "10px 12px", marginBottom: 7, borderRadius: 10,
+              cursor: "pointer", background: t.surfaceAlt, border: "none",
+              outline: on ? `2px solid ${t.accent}` : "none" }}>
+              <Avatar name={nm} color={t.accent} />
+              <span style={{ flex: 1, textAlign: "left", color: t.text, fontWeight: 700, fontSize: 13 }}>{nm}</span>
+              {on && <Check size={16} color={t.accent} />}
+            </button>
+          );
+        })}
+      </Field>
+      <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+        <Btn t={t} variant="soft" onClick={onCancel}>Cancelar</Btn>
+        <Btn t={t} full disabled={!name.trim()} onClick={() => onSave({ id: group.id, name, mentorshipIds: ids })}>
+          Guardar
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
 const miniBtn = { padding: "8px 12px", fontSize: 12 };
 
 function Avatar({ name, color, src, size = 38 }) {
